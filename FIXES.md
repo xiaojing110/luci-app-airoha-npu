@@ -142,7 +142,81 @@ opkg install luci-app-airoha-npu_*.ipk luci-i18n-airoha-npu-zh-cn_*.ipk
 
 ---
 
-## 三、其他隐藏问题
+## 三、rpcd 脚本丢了执行位：整页空白 / 「无法识别的 SoC」
+
+### 现象
+
+页面能打开、中文也出来了，但每一栏都是空的：当前频率/调度器/最大频率 `无`，
+CPU 核心 `0`，SoC `未知`，NPU `未运行`，保留内存 `0 KiB（0 个区域）`，超频那行
+`不可用：无法识别的 SoC`，Frame Engine 的 GDM/CDM 计数全是 0。
+
+### 原因
+
+`luci.mk` 装 `root/` 用的是 `cp -pR $(PKG_BUILD_DIR)/root/* $(1)/`，**模式原样保留**，
+所以「检出里这个文件的权限」就是「ipk 里这个文件的权限」。而
+`root/usr/libexec/rpcd/luci.airoha_npu` 在本仓库索引里被记成了 **100644**：
+
+```
+git ls-files -s root/usr/libexec/rpcd/luci.airoha_npu
+100644 <sha> 0	root/usr/libexec/rpcd/luci.airoha_npu      <- 修之前
+100755 <sha> 0	root/usr/libexec/rpcd/luci.airoha_npu      <- 原作者仓库、修之后
+```
+
+rpcd 是直接 `execve()` 这个脚本的（先 `list` 拿方法表，再 `call <method>`）。
+文件没有执行位时 `list` 一个字节都吐不出来，于是：
+
+* ubus 对象 `luci.airoha_npu` 没有任何方法，`getStatus` / `getPpeEntries` /
+  `getTokenInfo` / `getFrameEngine` 四个调用全部失败；
+* 视图里 `L.resolveDefault(callNpuStatus(), {})` 把失败吞成 `{}`，`st.soc` 就是
+  `undefined` → `socLabel()` 落到 `_('Unknown')`、`renderOcControls()` 落到
+  `_('Not available: unrecognised SoC')`；
+* `cpu_count`、`npu_loaded`、`memory_regions` 全按 `{}.xxx || 0` 渲染 → 0 / 空。
+
+所以这不是「SoC 识别不出来」，是**后端根本没跑**。真正的识别逻辑（`airoha_soc()`
+读 `/proc/device-tree/compatible` 和 HIR 寄存器、按 SoC 选 PLL 寄存器表）一行都没
+执行到。
+
+### 改动
+
+* 把 `root/usr/libexec/rpcd/luci.airoha_npu` 的模式恢复成 `100755`
+  （`git update-index --chmod=+x root/usr/libexec/rpcd/luci.airoha_npu`）。
+* `Makefile` 里加 `Package/luci-app-airoha-npu/postinst`：安装时补
+  `chmod 755` 再 `/etc/init.d/rpcd reload`，这样即使检出的执行位又丢了，装上也能用。
+  （luci.mk 的默认 postinst 用 `ifndef` 保护，自定义会覆盖它，所以清 LuCI 缓存那几
+  行也一并抄了回来。）
+* CI 里加一步 `test -x`：在 Linux 检出上执行位不对就直接失败，并打印修复命令，不
+  会让一个「装上去全空」的 ipk 发出去。
+
+### 已经装在路由器上的修复（不用重编）
+
+```sh
+chmod 755 /usr/libexec/rpcd/luci.airoha_npu
+/etc/init.d/rpcd reload          # 或 restart
+ubus -v list luci.airoha_npu     # 应能看到 getStatus/getPpeEntries/... 七个方法
+```
+
+`ubus -v list` 里能看到 `"getStatus":{}` 等七项，就说明对象注册好了；再刷新页面，
+频率、core 数、NPU 状态、PSE/GDM 计数就都会出来。
+
+### 复核
+
+```sh
+# 1. 仓库里必须是 100755
+git ls-files -s root/usr/libexec/rpcd/luci.airoha_npu
+# 100755 ...
+
+# 2. 编出来的 ipk 里也必须是 -rwxr-xr-x
+mkdir -p /tmp/ipk && tar -C /tmp/ipk -xzf luci-app-airoha-npu_*.ipk
+tar -tzvf /tmp/ipk/data.tar.gz | grep rpcd/luci.airoha_npu
+# -rwxr-xr-x ... /usr/libexec/rpcd/luci.airoha_npu
+
+# 3. 设备上方法表非空
+ubus -v list luci.airoha_npu
+```
+
+---
+
+## 四、其他隐藏问题
 
 | 问题 | 说明 | 改动 |
 |------|------|------|
@@ -162,15 +236,15 @@ opkg install luci-app-airoha-npu_*.ipk luci-i18n-airoha-npu-zh-cn_*.ipk
 | 文件 | 改动 |
 |------|------|
 | `luci-app-airoha-npu/luci-app-airoha-npu/` | 删除整份残留副本 |
-| `Makefile` | 1.0.2-r1，说明目录即包本身、不要再套一层 |
+| `Makefile` | 1.0.2-r1，说明目录即包本身、不要再套一层；新增 postinst（补执行位 + 重载 rpcd） |
 | `htdocs/.../status.js` | 3 处词条去掉尾随空格，间距改到 style |
 | `po/templates/luci-app-airoha-npu.pot` | 按实际视图重新生成，77 条，引用指向本包 |
 | `po/es/luci-app-airoha-npu.po` | 补齐到 77 条，清理 `#~` 失效词条，加 `Plural-Forms` |
 | `po/zh_Hans/luci-app-airoha-npu.po` | 新增，77 条全译 |
 | `scripts/gen-po.py` | 新增，生成 + 校验语言文件 |
-| `root/usr/libexec/rpcd/luci.airoha_npu` | 去掉会让 JSON 变形的 `echo 0` 备用分支 |
+| `root/usr/libexec/rpcd/luci.airoha_npu` | 模式恢复 100755；去掉会让 JSON 变形的 `echo 0` 备用分支 |
 | `.gitattributes` | 关键文件强制 LF |
-| `.github/workflows/build.yml` | airoha 两个子目标（an7581/an7583）矩阵编译、编译当前提交、带上语言包、校验语言文件、合并发布 |
+| `.github/workflows/build.yml` | airoha 两个子目标（an7581/an7583）矩阵编译、编译当前提交、带上语言包、校验语言文件与脚本执行位、合并发布 |
 | `README.md` | 语言包安装说明、目录结构、1.0.2 版本记录 |
 | `FIXES.md` | 本文件 |
 
@@ -178,6 +252,18 @@ opkg install luci-app-airoha-npu_*.ipk luci-i18n-airoha-npu-zh-cn_*.ipk
 
 ## English summary
 
+* **The rpcd plugin lost its executable bit — that is why the page is empty.**
+  `luci.mk` installs `root/` with `cp -pR`, so the mode in the checkout becomes
+  the mode in the ipk. `root/usr/libexec/rpcd/luci.airoha_npu` was recorded as
+  `100644` here (upstream has `100755`). rpcd `execve()`s that script to answer
+  `list`; without the bit it emits nothing, the `luci.airoha_npu` object gets no
+  methods, all four ubus calls fail, `L.resolveDefault(..., {})` swallows the
+  failure into `{}`, and the view renders 0 / 无 / 未运行 and
+  "not available: unrecognised SoC". It looks like SoC detection is broken, but
+  `airoha_soc()` never runs. Fixed by restoring `100755`, adding a `postinst`
+  that chmods and reloads rpcd, and a CI check that refuses to build when the
+  bit is missing. A device that already has the broken ipk only needs
+  `chmod 755 /usr/libexec/rpcd/luci.airoha_npu && /etc/init.d/rpcd reload`.
 * **Duplicate package tree removed.** `luci-app-airoha-npu/luci-app-airoha-npu/`
   was a stale full copy of the package. `include/scan.mk` walks every Makefile
   up to five levels deep, so that copy was scanned as a second package of the

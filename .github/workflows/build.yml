@@ -27,6 +27,19 @@ jobs:
       - name: 校验语言文件
         run: python3 scripts/gen-po.py --check
 
+      # rpcd 直接 exec 这个脚本，而 luci.mk 用 `cp -pR` 装 root/，所以检出时的
+      # 权限决定 ipk 里的权限。丢了执行位，rpcd 的 list 跑不起来，对象就没有任何
+      # 方法，页面会全是空的（"无法识别的 SoC"）。这里提前挡住。
+      - name: 校验 rpcd 脚本权限
+        run: |
+          if [ ! -x root/usr/libexec/rpcd/luci.airoha_npu ]; then
+            echo "root/usr/libexec/rpcd/luci.airoha_npu 没有执行位（应为 100755）。" >&2
+            echo "装出来的包 rpcd 无法执行，页面会全是空的。" >&2
+            echo "修复：git update-index --chmod=+x root/usr/libexec/rpcd/luci.airoha_npu" >&2
+            exit 1
+          fi
+          ls -l root/usr/libexec/rpcd/luci.airoha_npu
+
       - name: 下载 airoha/${{ matrix.subtarget }} SDK
         run: |
           set -euo pipefail

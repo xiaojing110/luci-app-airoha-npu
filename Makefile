@@ -31,6 +31,25 @@ LUCI_DESCRIPTION:=Status page for Airoha EN7581 and AN7583 SoCs: NPU state and \
 	mt76 debugfs nodes.
 LUCI_DEPENDS:=+luci-base @TARGET_airoha
 
+# rpcd execs /usr/libexec/rpcd/luci.airoha_npu directly and luci.mk installs
+# root/ with `cp -pR`, so the mode recorded in the checkout is the mode that
+# ends up in the ipk. That file is committed as 100755; if a clone ever loses
+# the bit, the package still installs but rpcd cannot run the plugin: `list`
+# produces nothing, the object gets no methods, every ubus call fails and the
+# page renders completely empty ("unrecognised SoC"). This hook keeps such an
+# install working. The rest repeats luci.mk's default postinst, which defining
+# our own replaces.
+define Package/luci-app-airoha-npu/postinst
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] || {
+	chmod 755 /usr/libexec/rpcd/luci.airoha_npu 2>/dev/null
+	rm -f /tmp/luci-indexcache.*
+	rm -rf /tmp/luci-modulecache/
+	/etc/init.d/rpcd reload 2>/dev/null
+	exit 0
+}
+endef
+
 include $(TOPDIR)/feeds/luci/luci.mk
 
 # call BuildPackage - OpenWrt buildroot signature

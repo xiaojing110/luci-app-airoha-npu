@@ -116,6 +116,28 @@ scp htdocs/luci-static/resources/view/airoha_npu/status.js root@router:/www/luci
 ssh root@router 'chmod +x /usr/libexec/rpcd/luci.airoha_npu && /etc/init.d/rpcd restart'
 ```
 
+## Troubleshooting
+
+### Every field is empty and Overclock says "not available: unrecognised SoC"
+
+That is not a detection failure — it means the page received no data at all,
+so rpcd never ran the backend. `L.resolveDefault()` in the view turns a failed
+RPC call into `{}`, and every row then renders its empty form (`无` / 0 /
+`未运行` / `未知`). The usual cause is a backend that is not executable or not
+registered:
+
+```sh
+ls -l /usr/libexec/rpcd/luci.airoha_npu       # must be -rwxr-xr-x
+chmod 755 /usr/libexec/rpcd/luci.airoha_npu   # if it is not
+/etc/init.d/rpcd reload
+ubus -v list luci.airoha_npu                  # must list the 7 methods
+```
+
+If `ubus -v list` prints `"getStatus":{}` and friends, the backend is fine and
+an empty field means the data source itself is missing on that build (see
+Requirements) — for example a missing cpufreq policy or a kernel without the
+`airoha-npu` driver.
+
 ## Translations
 
 The interface strings live in `po/<lang>/luci-app-airoha-npu.po`, and `luci.mk`
@@ -225,6 +247,10 @@ luci-app-airoha-npu/
 ## Version History
 
 ### v1.0.2
+- Fixed the empty page: the rpcd backend was tracked as mode `100644`, so
+  `luci.mk`'s `cp -pR` installed a plugin rpcd could not execute and every ubus
+  call failed. The mode is back to `100755`, a `postinst` re-applies it, and CI
+  refuses to build without it
 - Added the Simplified Chinese translation (`po/zh_Hans`); it was missing
   entirely, so no `luci-i18n-airoha-npu-zh-cn` package could be built
 - Completed the Spanish translation (was 50 of 77 strings empty) and dropped
