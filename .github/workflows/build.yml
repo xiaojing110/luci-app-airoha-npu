@@ -8,7 +8,17 @@ on:
 
 jobs:
   build:
+    name: airoha/${{ matrix.subtarget }}
     runs-on: ubuntu-latest
+    strategy:
+      # 两个子目标都要有结果，一个失败不要取消另一个
+      fail-fast: false
+      matrix:
+        # 包对 AN7581 和 AN7583 都适用：@TARGET_airoha 是 target 级依赖，
+        # 两个子目标都满足它。这里各编一次，确认在 an7583 上也能被选中、能编过。
+        subtarget:
+          - an7581
+          - an7583
     steps:
       - name: 检出源码
         uses: actions/checkout@v4
@@ -17,14 +27,14 @@ jobs:
       - name: 校验语言文件
         run: python3 scripts/gen-po.py --check
 
-      - name: 下载 airoha SDK
+      - name: 下载 airoha/${{ matrix.subtarget }} SDK
         run: |
           set -euo pipefail
           sudo timedatectl set-timezone Asia/Shanghai
           sudo apt-get install -y zstd
-          base="https://downloads.openwrt.org/snapshots/targets/airoha/an7581"
+          base="https://downloads.openwrt.org/snapshots/targets/airoha/${{ matrix.subtarget }}"
           # 快照文件名里的 gcc 版本会变，取目录里最新的那一个，不要写死。
-          sdk="$(curl -fsSL "$base/" | grep -oE 'openwrt-sdk-airoha-an7581_[^"]+\.tar\.zst' | head -n 1)"
+          sdk="$(curl -fsSL "$base/" | grep -oE 'openwrt-sdk-airoha-${{ matrix.subtarget }}_[^"]+\.tar\.zst' | head -n 1)"
           echo "使用 SDK: $sdk"
           curl -fsSL -o /tmp/sdk.tar.zst "$base/$sdk"
           mkdir -p /opt/sdk
@@ -76,11 +86,28 @@ jobs:
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: luci-app-airoha-npu-ipk
+          name: ipk-${{ matrix.subtarget }}
           path: artifacts/*.ipk
 
+  # 三个包都是 Architecture: all（luci.mk 在没有 src/Makefile 时把 PKGARCH 定为
+  # all），an7581 和 an7583 编出来的文件名相同、内容等价，所以只在最后合并发布
+  # 一次；万一将来某个包变成架构相关，两份不同架构的 ipk 也会一起发出去。
+  release:
+    name: 发布
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: 收集两个子目标的产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 列出产物
+        run: ls -l artifacts
+
       - name: 发布
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.c8 }}
@@ -94,6 +121,9 @@ jobs:
             | `luci-app-airoha-npu_*.ipk` | 主程序（页面、菜单、ACL、RPC 后端） |
             | `luci-i18n-airoha-npu-zh-cn_*.ipk` | 简体中文语言包 |
             | `luci-i18n-airoha-npu-es_*.ipk` | 西班牙语语言包 |
+
+            三个包都是 `Architecture: all`，**AN7581 与 AN7583 共用同一份**，
+            不用按 SoC 挑版本。
 
             主程序和语言包是两个包，**只装主程序界面会退回英文**：
 

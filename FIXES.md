@@ -146,7 +146,7 @@ opkg install luci-app-airoha-npu_*.ipk luci-i18n-airoha-npu-zh-cn_*.ipk
 
 | 问题 | 说明 | 改动 |
 |------|------|------|
-| CI 编译的 SDK 目标不对 | `build.yml` 用 `rockchip/armv8` + 22.03.5，而包依赖 `@TARGET_airoha`。目标不匹配时这个包在 menuconfig 里根本不可选，CI 永远编不出来 | 换成 airoha/an7581 SDK（快照），文件名里的 gcc 版本动态取 |
+| CI 编译的 SDK 目标不对 | `build.yml` 用 `rockchip/armv8` + 22.03.5，而包依赖 `@TARGET_airoha`。目标不匹配时这个包在 menuconfig 里根本不可选，CI 永远编不出来 | 换成 airoha 快照 SDK，`an7581` 和 `an7583` **两个子目标矩阵各编一次**（`@TARGET_airoha` 是 target 级依赖，两个子目标都满足），三个包都是 `Architecture: all`，发布时合并去重只发一份 |
 | CI 克隆的是别人的仓库 | `git clone https://github.com/h70076000/luci-app-airoha-npu.git`，编的不是当前提交 | 改成 `actions/checkout` |
 | CI 不编译语言包 | 只跑 `make package/luci-app-airoha-npu/compile`，i18n 包默认隐藏、不会被选 | `.config` 里打开 `CONFIG_LUCI_LANG_zh_Hans` / `_es`，并显式编译两个 i18n 目标 |
 | 发布产物名写死 | `mv *.ipk luci-app-airoha-npu_all.ipk` 会把语言包也并成一个名字 | 用 `find` 收集所有 `*airoha-npu*.ipk` 上传 |
@@ -170,7 +170,7 @@ opkg install luci-app-airoha-npu_*.ipk luci-i18n-airoha-npu-zh-cn_*.ipk
 | `scripts/gen-po.py` | 新增，生成 + 校验语言文件 |
 | `root/usr/libexec/rpcd/luci.airoha_npu` | 去掉会让 JSON 变形的 `echo 0` 备用分支 |
 | `.gitattributes` | 关键文件强制 LF |
-| `.github/workflows/build.yml` | airoha SDK、编译当前提交、带上语言包、校验语言文件 |
+| `.github/workflows/build.yml` | airoha 两个子目标（an7581/an7583）矩阵编译、编译当前提交、带上语言包、校验语言文件、合并发布 |
 | `README.md` | 语言包安装说明、目录结构、1.0.2 版本记录 |
 | `FIXES.md` | 本文件 |
 
@@ -195,9 +195,12 @@ opkg install luci-app-airoha-npu_*.ipk luci-i18n-airoha-npu-zh-cn_*.ipk
   stale or empty entry or on a format-specifier mismatch.
 * **CI fixed.** It used a rockchip 22.03.5 SDK for a package that depends on
   `@TARGET_airoha` (never selectable), cloned a third-party fork instead of the
-  commit under test, and never built the language packages. It now uses the
-  airoha/an7581 SDK, copies this checkout, enables `CONFIG_LUCI_LANG_zh_Hans`
-  and `_es`, and publishes all three ipk files.
+  commit under test, and never built the language packages. It now builds in a
+  matrix over both airoha subtargets — `an7581` **and** `an7583`, since the page
+  supports both SoCs — copies this checkout, enables
+  `CONFIG_LUCI_LANG_zh_Hans` and `_es`, and a final job merges the two artifact
+  sets and publishes all three ipk files. They are `Architecture: all`, so the
+  merged duplicate names collapse into a single copy that fits either SoC.
 * **Smaller fixes.** `.gitattributes` pins LF for the shell script and catalogs,
   the `grep -c … || echo 0` that produced `0\n0` for `printf %d` is gone, and the
   version is bumped to 1.0.2.

@@ -87,6 +87,10 @@ make menuconfig
 make package/luci-app-airoha-npu/compile V=s
 ```
 
+The package is `Architecture: all`, so a single build serves both the AN7581 and
+the AN7583 — they are the `an7581` and `an7583` subtargets of the same `airoha`
+target, and `@TARGET_airoha` is satisfied by either.
+
 It can also be kept out of the build tree as its own feed, which keeps it
 out of images that do not ask for it:
 
