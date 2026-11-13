@@ -32,18 +32,20 @@ jobs:
       - name: 校验语言文件
         run: python3 scripts/gen-po.py --check
 
-      # rpcd 直接 exec 这个脚本，而 luci.mk 用 `cp -pR` 装 root/，所以检出时的
-      # 权限决定包里的权限。丢了执行位，rpcd 的 list 跑不起来，对象就没有任何
-      # 方法，页面会全是空的（"无法识别的 SoC"）。这里提前挡住。
-      - name: 校验 rpcd 脚本权限
+      # rpcd 直接 exec 这个脚本，luci.mk 又用 `cp -pR` 装 root/，所以检出时的权限
+      # 就是最终进包里的权限。Windows 上改完再提交，git 只记录可执行位、NTFS 又没有
+      # 这一位，很容易被刷回 100644；那样装到路由器上 rpcd 执行不了，页面会全空
+      # （见 FIXES.md 第三节）。这里在 CI 内先 chmod 兜住，保证产物是对的，
+      # 同时告警提醒把仓库里的模式也修掉，不要长期依赖这个兜底。
+      - name: 修正 rpcd 脚本执行位
         run: |
-          if [ ! -x root/usr/libexec/rpcd/luci.airoha_npu ]; then
-            echo "root/usr/libexec/rpcd/luci.airoha_npu 没有执行位（应为 100755）。" >&2
-            echo "装出来的包 rpcd 无法执行，页面会全是空的。" >&2
-            echo "修复：git update-index --chmod=+x root/usr/libexec/rpcd/luci.airoha_npu" >&2
-            exit 1
+          f=root/usr/libexec/rpcd/luci.airoha_npu
+          if [ ! -x "$f" ]; then
+            echo "::warning file=$f,line=1::检出里这个脚本没有执行位（应为 100755），已在 CI 内 chmod 755 兜住；请在仓库里修掉：git update-index --chmod=+x $f"
+            chmod 755 "$f"
           fi
-          ls -l root/usr/libexec/rpcd/luci.airoha_npu
+          ls -l "$f"
+          test -x "$f"
 
       - name: 下载 airoha/${{ matrix.subtarget }} SDK
         run: |

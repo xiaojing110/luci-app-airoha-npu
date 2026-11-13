@@ -184,8 +184,15 @@ rpcd 是直接 `execve()` 这个脚本的（先 `list` 拿方法表，再 `call 
   `chmod 755` 再 `/etc/init.d/rpcd reload`，这样即使检出的执行位又丢了，装上也能用。
   （luci.mk 的默认 postinst 用 `ifndef` 保护，自定义会覆盖它，所以清 LuCI 缓存那几
   行也一并抄了回来。）
-* CI 里加一步 `test -x`：在 Linux 检出上执行位不对就直接失败，并打印修复命令，不
-  会让一个「装上去全空」的 ipk 发出去。
+* CI 里加了一步「修正 rpcd 脚本执行位」：检出里不是 755 就先 `chmod 755` 再编，
+  保证产物里的权限一定是对的，并用 `::warning` 提示用
+  `git update-index --chmod=+x root/usr/libexec/rpcd/luci.airoha_npu` 把仓库里的
+  模式也修掉。
+  > 早先这里是 `test -x` 直接失败；那会把「模式没修」变成「一个包都编不出来」，
+  > 而脚本权限已经有 postinst + CI chmod 双保险，没必要卡构建。代价是：模式没修
+  > 时每次 CI 都会留一条 warning，长期应当修掉。
+  > Windows 上光在资源管理器里改没用，NTFS 没有可执行位，`git add` 会把它刷回
+  > 100644，必须走 `git update-index --chmod=+x` 并提交。
 
 ### 已经装在路由器上的修复（不用重编）
 
