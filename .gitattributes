@@ -1,2 +1,14 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# These end up on the router byte for byte. A CRLF checkout would break the
+# rpcd script's shebang, and would turn every catalog edit into a whole-file
+# diff.
+Makefile text eol=lf
+root/usr/libexec/rpcd/luci.airoha_npu text eol=lf
+*.sh text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.po text eol=lf
+*.pot text eol=lf
+*.yml text eol=lf

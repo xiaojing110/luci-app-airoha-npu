@@ -209,7 +209,10 @@ get_status() {
 		npu_clock=$(cat /sys/kernel/debug/clk/npu/clk_rate 2>/dev/null || echo 0)
 	fi
 
-	local npu_cores=$(grep -c "airoha-npu-wdt" /proc/interrupts 2>/dev/null || echo 0)
+	# grep -c always prints a count, including "0" with a non-zero exit status.
+	# Appending "|| echo 0" would make this "0\n0", which is not a number and
+	# breaks the printf %d that builds the JSON reply below.
+	local npu_cores=$(grep -c "airoha-npu-wdt" /proc/interrupts 2>/dev/null)
 
 	local offload_bound=$(cat /sys/kernel/debug/ppe/bind 2>/dev/null | grep -c "^[0-9a-fA-F]")
 	local offload_total=$(cat /sys/kernel/debug/ppe/entries 2>/dev/null | grep -c "^[0-9a-fA-F]")

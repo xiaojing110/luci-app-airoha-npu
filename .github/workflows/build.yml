@@ -1,49 +1,103 @@
-name: 编译luci-app-airoha-npu
+name: 编译 luci-app-airoha-npu
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - '*'
 
 jobs:
- build:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - name: 下载工具链
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      # 语言包的源文件就是 po/，CI 里先确认它和视图还一致。
+      - name: 校验语言文件
+        run: python3 scripts/gen-po.py --check
+
+      - name: 下载 airoha SDK
         run: |
+          set -euo pipefail
           sudo timedatectl set-timezone Asia/Shanghai
-          wget -qO /opt/sdk.tar.xz https://downloads.openwrt.org/releases/22.03.5/targets/rockchip/armv8/openwrt-sdk-22.03.5-rockchip-armv8_gcc-11.2.0_musl.Linux-x86_64.tar.xz
-          tar -xJf /opt/sdk.tar.xz -C /opt
-          cd /opt/openwrt-sdk*
-          # 整个仓库就是包本身：把检出的工作区放进 package/，不要再套一层子目录
-          rm -rf package/luci-app-airoha-npu
-          cp -R "$GITHUB_WORKSPACE" package/luci-app-airoha-npu
-          rm -rf package/luci-app-airoha-npu/.git
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-          make defconfig
-      - name: 开始编译
+          sudo apt-get install -y zstd
+          base="https://downloads.openwrt.org/snapshots/targets/airoha/an7581"
+          # 快照文件名里的 gcc 版本会变，取目录里最新的那一个，不要写死。
+          sdk="$(curl -fsSL "$base/" | grep -oE 'openwrt-sdk-airoha-an7581_[^"]+\.tar\.zst' | head -n 1)"
+          echo "使用 SDK: $sdk"
+          curl -fsSL -o /tmp/sdk.tar.zst "$base/$sdk"
+          mkdir -p /opt/sdk
+          tar --zstd -xf /tmp/sdk.tar.zst -C /opt/sdk
+
+      - name: 放入 package 并更新 feed
         run: |
-          cd /opt/openwrt-sdk*
+          set -euo pipefail
+          cd /opt/sdk/openwrt-sdk-*/
+          # 整个检出目录就是包本身，不要再取一层 luci-app-airoha-npu/。
+          mkdir -p package/luci-app-airoha-npu
+          tar -C "$GITHUB_WORKSPACE" \
+            --exclude=./.git --exclude=./.github --exclude=./screenshots \
+            -cf - . | tar -C package/luci-app-airoha-npu -xf -
+          # SDK 里通常只有 feeds.conf.default；scripts/feeds 要的是 feeds.conf。
+          [ -f feeds.conf ] || cp feeds.conf.default feeds.conf
+          ./scripts/feeds update -a
+          # 两个语言包是隐藏包（HIDDEN:=1），由 LUCI_LANG_* 选中；.config 里再显式
+          # 写一遍包名，两者任意一个生效都行。
+          printf '%s\n' \
+            'CONFIG_LUCI_LANG_zh_Hans=y' \
+            'CONFIG_LUCI_LANG_es=y' \
+            'CONFIG_PACKAGE_luci-i18n-airoha-npu-zh-cn=y' \
+            'CONFIG_PACKAGE_luci-i18n-airoha-npu-es=y' >> .config
+          make defconfig
+          grep -E 'CONFIG_LUCI_LANG_(zh_Hans|es)|CONFIG_PACKAGE_luci-i18n-airoha' .config
+
+      - name: 编译
+        run: |
+          set -euo pipefail
+          cd /opt/sdk/openwrt-sdk-*/
+          # package/<目录>/compile 会把这个 Makefile 里所有已启用的包都编出来：
+          # 主程序 + 两个 luci-i18n 包（它们由上面的 CONFIG_LUCI_LANG_* 打开）。
+          # 注意不要写 package/luci-i18n-airoha-npu-zh-cn/compile —— OpenWrt 的
+          # 编译目标是按目录生成的，语言包没有自己的目录。
           make package/luci-app-airoha-npu/compile V=s -j1
-          # po/ 下每种语言都会额外生成一个 luci-i18n-airoha-npu-<lang> 包；
-          # 旧版 LuCI 的 luci.mk 不认识某个语言码时会跳过，所以这里不强制
-          make package/luci-i18n-airoha-npu-es/compile V=s -j1 || true
-          make package/luci-i18n-airoha-npu-zh_Hans/compile V=s -j1 || true
-          find bin/packages -name '*.ipk' | sort
-          echo "build_time=$(date '+%Y年%m月%d日%H:%M:%S' | jq -sRr @uri)" >> $GITHUB_ENV
-          echo "tag=$(date '+%Y-%m-%d')" >> $GITHUB_ENV
-      - name: 发布
-        uses: softprops/action-gh-release@v1
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          find bin/packages -name '*airoha-npu*.ipk' \
+            -exec cp -v {} "$GITHUB_WORKSPACE/artifacts/" \;
+          ls -l "$GITHUB_WORKSPACE/artifacts"
+          # 三个包缺一不可，少一个发出去的 ipk 就没有中文界面。
+          for pat in 'luci-app-airoha-npu_*.ipk' \
+                     'luci-i18n-airoha-npu-zh-cn_*.ipk' \
+                     'luci-i18n-airoha-npu-es_*.ipk'; do
+            test -n "$(ls "$GITHUB_WORKSPACE"/artifacts/$pat 2>/dev/null)" \
+              || { echo "缺少构建产物: $pat" >&2; exit 1; }
+          done
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
         with:
-            token: ${{ secrets.c8 }}
-            body: |
-             > ![](https://img.shields.io/badge/%E7%BC%96%E8%AF%91%E6%97%B6%E9%97%B4-${{ env.build_time }}-8267?logo=github&labelColor=%E9%A1%BB)![](https://img.shields.io/github/downloads/${{ github.repository }}/${{ env.tag }}/total?label=%E4%B8%8B%E8%BD%BD%E6%AC%A1%E6%95%B0&logo=github)
+          name: luci-app-airoha-npu-ipk
+          path: artifacts/*.ipk
 
+      - name: 发布
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.c8 }}
+          tag_name: ${{ github.ref_name }}
+          files: artifacts/*.ipk
+          body: |
+            ## luci-app-airoha-npu ${{ github.ref_name }}
 
-               **可从[LEDE仓库](http://mirrors.cloud.tencent.com/lede/) 、[ ImmortalWrt仓库 ](https://mirrors.vsean.net/openwrt/) 找到对应的版本对应的CPU架构**
-               **luci-app-airoha-npu_*.ipk 是主程序；luci-i18n-airoha-npu-*.ipk 是语言包，中文界面需要装 luci-i18n-airoha-npu-zh_Hans**
+            | 文件 | 说明 |
+            |------|------|
+            | `luci-app-airoha-npu_*.ipk` | 主程序（页面、菜单、ACL、RPC 后端） |
+            | `luci-i18n-airoha-npu-zh-cn_*.ipk` | 简体中文语言包 |
+            | `luci-i18n-airoha-npu-es_*.ipk` | 西班牙语语言包 |
 
-               部分固件无法启动，可以尝试设置数据目录为外置存储设备里
+            主程序和语言包是两个包，**只装主程序界面会退回英文**：
 
-            tag_name: ${{ env.tag }}
-            files: /opt/openwrt-sdk*/bin/packages/*/*/*.ipk
+            ```sh
+            opkg install luci-app-airoha-npu_*.ipk luci-i18n-airoha-npu-zh-cn_*.ipk
+            # 系统 -> 系统 -> 语言和界面 选「简体中文」，保存并应用后重新登录
+            ```

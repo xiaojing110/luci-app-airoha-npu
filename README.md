@@ -70,20 +70,10 @@ A missing source costs its own section; the rest of the page still renders.
 
 ## Installation
 
-The repository *is* the package: `Makefile`, `htdocs/`, `root/` and `po/` all
-sit at the top level. It must stay that way — a second copy of the package
-nested inside the tree is picked up by the feed scanner as another package and
-fails to evaluate.
-
-The LuCI feed has to be installed first, because the package build includes
-`feeds/luci/luci.mk`:
-
-```sh
-./scripts/feeds update -a
-./scripts/feeds install -a
-```
-
 ### From OpenWrt build
+
+The LuCI feed has to be installed first: the package build includes
+`feeds/luci/luci.mk`.
 
 ```sh
 # Add to your build tree
@@ -92,23 +82,13 @@ git clone https://github.com/rchen14b/luci-app-airoha-npu.git package/luci-app-a
 # Enable in menuconfig
 make menuconfig
 # Navigate to: LuCI -> Applications -> luci-app-airoha-npu
-# Also enable the translation you want; the language menu is driven by
-# `LUCI_LANG_<code>`, which selects luci-i18n-<app>-<code> for every app
-#   LuCI -> Translations -> 简体中文 (Simplified Chinese)
-#   LuCI -> Translations -> Español (Spanish)
 
 # Build
 make package/luci-app-airoha-npu/compile V=s
 ```
 
-`luci.mk` installs `htdocs/` into `/www/luci-static/resources` and `root/` into
-`/`, so there is nothing else to copy on the router.
-
-### As its own feed
-
-Both feed forms work. `src-link` keeps the clone wherever you like, so the
-directory holding the clone is the feed and `luci-app-airoha-npu` is the only
-package in it:
+It can also be kept out of the build tree as its own feed, which keeps it
+out of images that do not ask for it:
 
 ```sh
 # clone anywhere, then point a feed at the directory holding the clone
@@ -118,51 +98,6 @@ echo "src-link airoha $HOME/openwrt-feeds" >> feeds.conf
 ./scripts/feeds update airoha
 ./scripts/feeds install luci-app-airoha-npu
 ```
-
-`src-git` clones into `feeds/npu/luci-app-airoha-npu` and the scanner still
-finds the top-level Makefile, so this works as well:
-
-```sh
-echo "src-git npu https://github.com/rchen14b/luci-app-airoha-npu.git" >> feeds.conf.default
-./scripts/feeds update npu
-./scripts/feeds install luci-app-airoha-npu
-```
-
-If `feeds install` reports `ERROR: please fix
-feeds/npu/luci-app-airoha-npu/luci-app-airoha-npu/Makefile`, the tree on disk
-is an old revision that still carries the nested duplicate; delete that
-directory (or re-clone) instead of editing its `include` line.
-
-### Language packages
-
-Translations are built as separate packages, one per `po/<lang>` directory, by
-`luci.mk`. `luci-app-airoha-npu` alone installs no catalog and the page stays
-English; the language package is what makes the menu, the page and the ACL
-description appear translated:
-
-| Directory | Package | Installs (`.lmo` in `/usr/lib/lua/luci/i18n/`) |
-|-----------|---------|----------|
-| `po/es/` | `luci-i18n-airoha-npu-es` | `luci-app-airoha-npu.es.lmo` |
-| `po/zh_Hans/` | `luci-i18n-airoha-npu-zh_Hans` | `luci-app-airoha-npu.zh-cn.lmo` |
-
-The language code in the file name comes from `LUCI_LC_ALIAS`: `zh_Hans` is
-`zh-cn`, which is what the dispatcher asks for after it turns the uci value
-`zh_cn` into `zh-cn`. The Chinese UI therefore needs the LuCI base catalogue as
-well — it is part of every Chinese firmware, and it is what puts 简体中文 in the
-language list:
-
-```sh
-# on the router, when the language package is not in the image
-opkg install luci-i18n-airoha-npu-zh_Hans
-# then pick 简体中文 in System -> System -> Language and re-login
-```
-
-On a first-boot image, the `uci-defaults` file the language package installs
-registers the language in `luci.languages` on its own.
-
-Adding a language only needs `po/<lang>/luci-app-airoha-npu.po` with the same
-`msgid` set as `po/templates/luci-app-airoha-npu.pot`; `luci.mk` emits the
-package, the `.lmo` and the `uci-defaults` entry for it.
 
 ### Manual install (dev)
 
@@ -176,6 +111,56 @@ scp htdocs/luci-static/resources/view/airoha_npu/status.js root@router:/www/luci
 # Set permissions and restart
 ssh root@router 'chmod +x /usr/libexec/rpcd/luci.airoha_npu && /etc/init.d/rpcd restart'
 ```
+
+## Translations
+
+The interface strings live in `po/<lang>/luci-app-airoha-npu.po`, and `luci.mk`
+turns every directory under `po/` into a **separate** package:
+`luci-i18n-airoha-npu-<lang>`. Installing `luci-app-airoha-npu` alone does not
+install any translation — the page, the menu entry and the ACL description then
+stay English. It ships with:
+
+| Language | Directory | Package | Installed catalog |
+|----------|-----------|---------|-------------------|
+| Simplified Chinese | `po/zh_Hans` | `luci-i18n-airoha-npu-zh-cn` | `luci-app-airoha-npu.zh-cn.lmo` |
+| Spanish | `po/es` | `luci-i18n-airoha-npu-es` | `luci-app-airoha-npu.es.lmo` |
+
+Installing the language package also appends the language to `luci.languages`
+through its uci-defaults script, so it appears in *System → System → Language
+and Interface* without extra configuration:
+
+```sh
+opkg install luci-i18n-airoha-npu-zh-cn_*.ipk
+# then pick 简体中文 in System -> System and log in again
+```
+
+When building from source the language packages are hidden by default and have
+to be selected:
+
+```sh
+# either in menuconfig: LuCI -> Translations -> Simplified Chinese (zh_Hans)
+# or directly:
+echo 'CONFIG_LUCI_LANG_zh_Hans=y' >> .config
+make defconfig
+make package/luci-app-airoha-npu/compile V=s
+```
+
+### Adding or changing strings
+
+`po/` is generated from what the code actually asks for, which is the only way
+to be sure a `msgid` matches: a trailing space in `_('Total ')`, for instance,
+can never match a catalog entry that says `Total`. After editing the view, the
+menu entry or the ACL description, regenerate the three catalogs and re-check
+them:
+
+```sh
+python3 scripts/gen-po.py          # rewrite po/templates/*.pot, po/es, po/zh_Hans
+python3 scripts/gen-po.py --check  # what CI runs: no missing/stale/empty entries
+```
+
+The script scans every `_('...')` literal in `status.js` (plus the menu title
+and the ACL description), sorts by `msgid`, refreshes the `#:` references, and
+fails if a format specifier in a translation does not match its `msgid`.
 
 ## Data Sources
 
@@ -191,6 +176,11 @@ ssh root@router 'chmod +x /usr/libexec/rpcd/luci.airoha_npu && /etc/init.d/rpcd 
 
 ## Project Structure
 
+This repository root *is* the package — there is no second
+`luci-app-airoha-npu/` level inside it. `include/scan.mk` treats every Makefile
+up to five directories deep as its own package, so a nested copy would be
+scanned as a duplicate of this one.
+
 ```
 luci-app-airoha-npu/
 ├── Makefile                                          # OpenWrt package build
@@ -198,9 +188,9 @@ luci-app-airoha-npu/
 │   └── luci-static/resources/view/airoha_npu/
 │       └── status.js                                 # LuCI JavaScript view
 ├── po/
-│   ├── templates/luci-app-airoha-npu.pot             # Source strings
-│   ├── es/luci-app-airoha-npu.po                     # Spanish catalog
-│   └── zh_Hans/luci-app-airoha-npu.po                # Simplified Chinese catalog
+│   ├── templates/luci-app-airoha-npu.pot             # generated from the view
+│   ├── es/luci-app-airoha-npu.po                     # Spanish translation
+│   └── zh_Hans/luci-app-airoha-npu.po                # Simplified Chinese
 ├── root/
 │   └── usr/
 │       ├── libexec/rpcd/
@@ -210,7 +200,10 @@ luci-app-airoha-npu/
 │           │   └── luci-app-airoha-npu.json          # Menu config
 │           └── rpcd/acl.d/
 │               └── luci-app-airoha-npu.json          # ACL permissions
-└── screenshots/
+├── scripts/
+│   └── gen-po.py                                     # catalog generator / check
+├── screenshots/
+└── FIXES.md                                          # what was fixed, and how to verify
 ```
 
 ## RPC Methods
@@ -228,14 +221,17 @@ luci-app-airoha-npu/
 ## Version History
 
 ### v1.0.2
-- Removed the stale second copy of the package that the feed scanner tried to
-  build (`ERROR: please fix .../luci-app-airoha-npu/luci-app-airoha-npu/Makefile`)
-- Added a complete Simplified Chinese catalog (`po/zh_Hans`) and completed the
-  Spanish one; both are generated from the strings the page actually uses
-- Fixed three strings (`Bound`, `Manages:`, `Total`) whose trailing space kept
-  them from matching their catalogs, so they stayed English in every language
-- The i18n packages now line up with `po/templates`, and `.pot` references point
-  at this package instead of the old `feeds/luci/applications` path
+- Added the Simplified Chinese translation (`po/zh_Hans`); it was missing
+  entirely, so no `luci-i18n-airoha-npu-zh-cn` package could be built
+- Completed the Spanish translation (was 50 of 77 strings empty) and dropped
+  its obsolete `#~` entries
+- Removed three trailing spaces from `_('Bound ')`, `_('Total ')` and
+  `_('Manages: ')` in the view; they could never match a catalog entry
+- Regenerated `po/templates/*.pot` from the view, with correct references
+- Deleted the stale duplicate package tree that broke `scripts/feeds` and
+  shadowed the real files
+- CI: build from this checkout on an airoha SDK and ship the language packages
+- Added `scripts/gen-po.py` to regenerate and validate the catalogs
 
 ### v1.0.1
 - Unified Frame Engine diagram with architectural layout matching AN7581 data paths

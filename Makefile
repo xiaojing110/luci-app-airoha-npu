@@ -1,10 +1,14 @@
 # This is free software, licensed under the Apache License, Version 2.0 .
+
+# The repository root is the package itself: Makefile, htdocs/, root/ and po/
+# all live at the top level, so the checkout is cloned straight into
+# package/luci-app-airoha-npu or used as a src-link feed entry.
 #
-# The directory layout below this Makefile is the package itself, so the repo
-# can be cloned straight into package/luci-app-airoha-npu or used as its own
-# feed (see README.md). Do not nest a second copy of the package inside it:
-# the feed scanner walks every directory and would try to build that copy as
-# a second package, with an include path that only resolves in the luci feed.
+# Do not nest another luci-app-airoha-npu/ directory below this one.
+# include/scan.mk treats every Makefile up to five directory levels deep as a
+# package of its own, so a nested copy is scanned as a second package with the
+# same name: its stale files shadow this one and a bad `include` in it aborts
+# the feed scan with "please fix .../Makefile".
 
 include $(TOPDIR)/rules.mk
 
