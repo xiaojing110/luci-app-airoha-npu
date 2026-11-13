@@ -70,6 +70,21 @@ A missing source costs its own section; the rest of the page still renders.
 
 ## Installation
 
+### From a release
+
+Releases carry three packages in two formats — pick the one that matches your
+firmware's package manager:
+
+| File | For | Install |
+|------|-----|---------|
+| `luci-app-airoha-npu-*.apk` | OpenWrt **25.12+** (apk) | `apk add --allow-untrusted ./luci-app-airoha-npu-*.apk` |
+| `luci-app-airoha-npu_*.ipk` | OpenWrt **24.10 and older** (opkg) | `opkg install luci-app-airoha-npu_*.ipk` |
+| `luci-i18n-airoha-npu-zh-cn[-_]*` | Simplified Chinese | same manager as above |
+| `luci-i18n-airoha-npu-es[-_]*` | Spanish | same manager as above |
+
+All of them are `Architecture: all`, so the same file fits the AN7581 and the
+AN7583; only the package format depends on the firmware.
+
 ### From OpenWrt build
 
 The LuCI feed has to be installed first: the package build includes
@@ -161,15 +176,26 @@ opkg install luci-i18n-airoha-npu-zh-cn_*.ipk
 ```
 
 When building from source the language packages are hidden by default and have
-to be selected:
+to be selected. They are built with `po2lmo`, which is *not* part of the SDK but
+comes from `luci-base`'s host build, so a tree that only builds this package
+needs that host tool first — otherwise the i18n packages fail with
+`po2lmo: command not found`:
 
 ```sh
+./scripts/feeds update -a
+./scripts/feeds install luci-base
+make package/feeds/luci/luci-base/host/compile   # provides staging_dir/host/bin/po2lmo
+
 # either in menuconfig: LuCI -> Translations -> Simplified Chinese (zh_Hans)
 # or directly:
 echo 'CONFIG_LUCI_LANG_zh_Hans=y' >> .config
 make defconfig
 make package/luci-app-airoha-npu/compile V=s
 ```
+
+The package format follows the SDK: OpenWrt 25.12 and newer emit `.apk`
+(`CONFIG_USE_APK=y`), 24.10 and older emit `.ipk`. Flip `CONFIG_USE_APK` in
+`.config` to build the other one.
 
 ### Adding or changing strings
 
@@ -247,6 +273,10 @@ luci-app-airoha-npu/
 ## Version History
 
 ### v1.0.2
+- Releases now ship **both** `.apk` (OpenWrt 25.12+) and `.ipk` (24.10 and
+  older), built from the `an7581` and `an7583` SDK subtargets
+- Fixed the i18n build in a package-only tree: `po2lmo` comes from
+  `luci-base`'s host build, which the workflow now builds first
 - Fixed the empty page: the rpcd backend was tracked as mode `100644`, so
   `luci.mk`'s `cp -pR` installed a plugin rpcd could not execute and every ubus
   call failed. The mode is back to `100755`, a `postinst` re-applies it, and CI

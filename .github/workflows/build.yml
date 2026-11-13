@@ -8,10 +8,10 @@ on:
 
 jobs:
   build:
-    name: airoha/${{ matrix.subtarget }}
+    name: airoha/${{ matrix.subtarget }} ${{ matrix.format }}
     runs-on: ubuntu-latest
     strategy:
-      # 两个子目标都要有结果，一个失败不要取消另一个
+      # 四个组合互相独立，一个失败不要取消其它的
       fail-fast: false
       matrix:
         # 包对 AN7581 和 AN7583 都适用：@TARGET_airoha 是 target 级依赖，
@@ -19,6 +19,11 @@ jobs:
         subtarget:
           - an7581
           - an7583
+        # 25.12 起发行版改用 apk（快照 SDK 默认就是 apk）；ipk 留给 24.10 及
+        # 更早的固件。构建系统靠 CONFIG_USE_APK 切换，两条路都在同一份 SDK 里。
+        format:
+          - apk
+          - ipk
     steps:
       - name: 检出源码
         uses: actions/checkout@v4
@@ -28,7 +33,7 @@ jobs:
         run: python3 scripts/gen-po.py --check
 
       # rpcd 直接 exec 这个脚本，而 luci.mk 用 `cp -pR` 装 root/，所以检出时的
-      # 权限决定 ipk 里的权限。丢了执行位，rpcd 的 list 跑不起来，对象就没有任何
+      # 权限决定包里的权限。丢了执行位，rpcd 的 list 跑不起来，对象就没有任何
       # 方法，页面会全是空的（"无法识别的 SoC"）。这里提前挡住。
       - name: 校验 rpcd 脚本权限
         run: |
@@ -47,13 +52,15 @@ jobs:
           sudo apt-get install -y zstd
           base="https://downloads.openwrt.org/snapshots/targets/airoha/${{ matrix.subtarget }}"
           # 快照文件名里的 gcc 版本会变，取目录里最新的那一个，不要写死。
-          sdk="$(curl -fsSL "$base/" | grep -oE 'openwrt-sdk-airoha-${{ matrix.subtarget }}_[^"]+\.tar\.zst' | head -n 1)"
+          # 用 grep -m1 而不是 `| head -n1`：后者会让 grep 吃 SIGPIPE，
+          # 配上 set -o pipefail 会莫名其妙地整步失败。
+          sdk="$(curl -fsSL "$base/" | grep -m1 -oE 'openwrt-sdk-airoha-${{ matrix.subtarget }}_[^"]+\.tar\.zst')"
           echo "使用 SDK: $sdk"
           curl -fsSL -o /tmp/sdk.tar.zst "$base/$sdk"
           mkdir -p /opt/sdk
           tar --zstd -xf /tmp/sdk.tar.zst -C /opt/sdk
 
-      - name: 放入 package 并更新 feed
+      - name: 放入 package、更新 feed、生成配置
         run: |
           set -euo pipefail
           cd /opt/sdk/openwrt-sdk-*/
@@ -62,36 +69,73 @@ jobs:
           tar -C "$GITHUB_WORKSPACE" \
             --exclude=./.git --exclude=./.github --exclude=./screenshots \
             -cf - . | tar -C package/luci-app-airoha-npu -xf -
+
           # SDK 里通常只有 feeds.conf.default；scripts/feeds 要的是 feeds.conf。
           [ -f feeds.conf ] || cp feeds.conf.default feeds.conf
           ./scripts/feeds update -a
-          # 两个语言包是隐藏包（HIDDEN:=1），由 LUCI_LANG_* 选中；.config 里再显式
-          # 写一遍包名，两者任意一个生效都行。
+
+          # 语言包由 luci.mk 生成，安装阶段要调用 po2lmo。po2lmo 不在 SDK 里，
+          # 它由 luci feed 的 luci-base 通过 host build 编进
+          # staging_dir/host/bin/，所以 luci-base 必须先被 feeds install 进来。
+          ./scripts/feeds install luci-base
+
           printf '%s\n' \
+            'CONFIG_PACKAGE_luci-base=y' \
+            'CONFIG_PACKAGE_luci-app-airoha-npu=y' \
             'CONFIG_LUCI_LANG_zh_Hans=y' \
             'CONFIG_LUCI_LANG_es=y' \
             'CONFIG_PACKAGE_luci-i18n-airoha-npu-zh-cn=y' \
             'CONFIG_PACKAGE_luci-i18n-airoha-npu-es=y' >> .config
+          # 只动 USE_APK 这一项，SDK 自带的 target/subtarget 选择必须原样保留，
+          # 否则 defconfig 会挑回默认目标，包就变成不可选的了。
+          if [ -f .config ]; then
+            sed -i '/^CONFIG_USE_APK=/d; /^# CONFIG_USE_APK is not set/d' .config
+          fi
+          if [ "${{ matrix.format }}" = apk ]; then
+            echo 'CONFIG_USE_APK=y' >> .config
+          else
+            echo '# CONFIG_USE_APK is not set' >> .config
+          fi
           make defconfig
-          grep -E 'CONFIG_LUCI_LANG_(zh_Hans|es)|CONFIG_PACKAGE_luci-i18n-airoha' .config
+
+          if [ "${{ matrix.format }}" = apk ]; then
+            grep -qx 'CONFIG_USE_APK=y' .config \
+              || { echo 'apk 模式没生效（CONFIG_USE_APK）' >&2; exit 1; }
+          else
+            grep -qx '# CONFIG_USE_APK is not set' .config \
+              || { echo 'ipk 模式没生效（CONFIG_USE_APK）' >&2; exit 1; }
+          fi
+          grep -E 'CONFIG_USE_APK|CONFIG_LUCI_LANG_(zh_Hans|es)|CONFIG_PACKAGE_luci-i18n-airoha' .config
 
       - name: 编译
         run: |
           set -euo pipefail
           cd /opt/sdk/openwrt-sdk-*/
+          fmt="${{ matrix.format }}"
+
+          # po2lmo / jsmin：luci-base 的 host build，装到 staging_dir/host/bin。
+          # 少了这一步，i18n 包会以 `po2lmo: command not found` 失败。
+          make package/feeds/luci/luci-base/host/compile V=s -j1
+          test -x staging_dir/host/bin/po2lmo \
+            || { echo 'luci-base host build 没产出 po2lmo' >&2; exit 1; }
+          ls -l staging_dir/host/bin/po2lmo
+
           # package/<目录>/compile 会把这个 Makefile 里所有已启用的包都编出来：
           # 主程序 + 两个 luci-i18n 包（它们由上面的 CONFIG_LUCI_LANG_* 打开）。
           # 注意不要写 package/luci-i18n-airoha-npu-zh-cn/compile —— OpenWrt 的
           # 编译目标是按目录生成的，语言包没有自己的目录。
           make package/luci-app-airoha-npu/compile V=s -j1
+
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
-          find bin/packages -name '*airoha-npu*.ipk' \
+          find bin/packages -name "*airoha-npu*.${fmt}" \
             -exec cp -v {} "$GITHUB_WORKSPACE/artifacts/" \;
           ls -l "$GITHUB_WORKSPACE/artifacts"
-          # 三个包缺一不可，少一个发出去的 ipk 就没有中文界面。
-          for pat in 'luci-app-airoha-npu_*.ipk' \
-                     'luci-i18n-airoha-npu-zh-cn_*.ipk' \
-                     'luci-i18n-airoha-npu-es_*.ipk'; do
+
+          # 三个包缺一不可，少一个发出去的包就没有中文界面。
+          # apk 用 `名字-版本.apk`，ipk 用 `名字_版本_架构.ipk`，所以都用 [-_] 兜住。
+          for pat in "luci-app-airoha-npu[-_]*.${fmt}" \
+                     "luci-i18n-airoha-npu-zh-cn[-_]*.${fmt}" \
+                     "luci-i18n-airoha-npu-es[-_]*.${fmt}"; do
             test -n "$(ls "$GITHUB_WORKSPACE"/artifacts/$pat 2>/dev/null)" \
               || { echo "缺少构建产物: $pat" >&2; exit 1; }
           done
@@ -99,19 +143,19 @@ jobs:
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: ipk-${{ matrix.subtarget }}
-          path: artifacts/*.ipk
+          name: pkg-${{ matrix.subtarget }}-${{ matrix.format }}
+          path: artifacts/*
 
   # 三个包都是 Architecture: all（luci.mk 在没有 src/Makefile 时把 PKGARCH 定为
-  # all），an7581 和 an7583 编出来的文件名相同、内容等价，所以只在最后合并发布
-  # 一次；万一将来某个包变成架构相关，两份不同架构的 ipk 也会一起发出去。
+  # all），所以 an7581 和 an7583 同名产物内容等价，合并时自然去重；apk 和 ipk
+  # 扩展名不同，会一起发出去。
   release:
     name: 发布
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
-      - name: 收集两个子目标的产物
+      - name: 收集所有产物
         uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -125,22 +169,30 @@ jobs:
         with:
           token: ${{ secrets.c8 }}
           tag_name: ${{ github.ref_name }}
-          files: artifacts/*.ipk
+          files: |
+            artifacts/*.apk
+            artifacts/*.ipk
           body: |
             ## luci-app-airoha-npu ${{ github.ref_name }}
 
-            | 文件 | 说明 |
-            |------|------|
-            | `luci-app-airoha-npu_*.ipk` | 主程序（页面、菜单、ACL、RPC 后端） |
-            | `luci-i18n-airoha-npu-zh-cn_*.ipk` | 简体中文语言包 |
-            | `luci-i18n-airoha-npu-es_*.ipk` | 西班牙语语言包 |
+            | 文件 | 用于 | 安装 |
+            |------|------|------|
+            | `luci-app-airoha-npu-*.apk` | OpenWrt **25.12+**（apk） | `apk add --allow-untrusted ./luci-app-airoha-npu-*.apk` |
+            | `luci-app-airoha-npu_*.ipk` | OpenWrt **24.10 及更早**（opkg） | `opkg install luci-app-airoha-npu_*.ipk` |
+            | `luci-i18n-airoha-npu-zh-cn[-_]*` | 简体中文语言包 | 同上面各自的包管理器 |
+            | `luci-i18n-airoha-npu-es[-_]*` | 西班牙语语言包 | 同上 |
 
-            三个包都是 `Architecture: all`，**AN7581 与 AN7583 共用同一份**，
-            不用按 SoC 挑版本。
+            三个包都是 `Architecture: all`，**AN7581 与 AN7583 共用同一份**，不用按
+            SoC 挑版本；只要按固件版本挑 `apk` 还是 `ipk`。
 
             主程序和语言包是两个包，**只装主程序界面会退回英文**：
 
             ```sh
+            # 25.12+ / apk
+            apk add --allow-untrusted ./luci-app-airoha-npu-*.apk ./luci-i18n-airoha-npu-zh-cn-*.apk
+
+            # 24.10 及更早 / opkg
             opkg install luci-app-airoha-npu_*.ipk luci-i18n-airoha-npu-zh-cn_*.ipk
-            # 系统 -> 系统 -> 语言和界面 选「简体中文」，保存并应用后重新登录
+
+            # 然后：系统 -> 系统 -> 语言和界面 选「简体中文」，保存并应用后重新登录
             ```

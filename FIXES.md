@@ -216,7 +216,60 @@ ubus -v list luci.airoha_npu
 
 ---
 
-## 四、其他隐藏问题
+## 四、CI 编不出来：`po2lmo: command not found` 与 25.12 改用 apk
+
+### 现象
+
+```
+po2lmo /opt/sdk/.../package/luci-app-airoha-npu/po/es/luci-app-airoha-npu.po ...
+bash: line 1: po2lmo: command not found
+make[2]: *** [.../luci.mk:410: .../luci-i18n-airoha-npu-es-0.261113.64439.apk] Error 127
+```
+
+### 原因
+
+1. **`po2lmo` 不在 SDK 里**。`luci.mk` 安装语言包时直接调用 `po2lmo`（裸命令，走 PATH 里的
+   `staging_dir/host/bin`），而 `po2lmo` 是 luci feed 的 **`luci-base` 的 host build** 编出来的
+   （`modules/luci-base/Makefile` 里的 `Host/Compile` / `Host/Install`）。
+   CI 只 `feeds update -a`、没 `feeds install luci-base`，也没有目标让 host build 跑起来，
+   所以 `staging_dir/host/bin/po2lmo` 从来不存在 → Error 127。
+   （完整固件里 `luci-base` 一定会被编译，所以本地全量编译不会遇到；只单独编这个包才会。）
+2. **25.12 起产物是 `.apk`**。快照 SDK 的 `CONFIG_USE_APK` 默认是 `y`，
+   `luci.mk` 生成的是 `luci-i18n-airoha-npu-es-<版本>.apk`，而旧的 CI 只找 `*.ipk`，
+   即使编过了也收集不到、更发不出去。
+
+### 改动
+
+* CI 里 `./scripts/feeds install luci-base`，然后
+  `make package/feeds/luci/luci-base/host/compile` 先把 `po2lmo`（和 `jsmin`）编进
+  `staging_dir/host/bin/`，并用 `test -x staging_dir/host/bin/po2lmo` 断言它真的产出了。
+* 矩阵加一维 `format: [apk, ipk]`：用 `.config` 里的 `CONFIG_USE_APK` 切换包管理器，
+  同一份快照 SDK 同时产出 25.12+ 需要的 `apk` 和 24.10 及更早用的 `ipk`。
+  改 `.config` 时只删/写 `CONFIG_USE_APK` 一行，**SDK 自带的 target/subtarget 配置必须
+  原样保留**，否则 `defconfig` 会挑回默认目标，包又变成不可选。
+* 产物匹配同时兼容两种命名：`名字-版本.apk` 与 `名字_版本_架构.ipk`，所以用
+  `luci-app-airoha-npu[-_]*.<ext>` 这个写法。
+* 发布改成先合并所有产物再一起发，`files:` 同时列 `*.apk` 和 `*.ipk`。
+
+### 复核
+
+```sh
+# 1. host 工具确实编出来了
+ls -l staging_dir/host/bin/po2lmo staging_dir/host/bin/jsmin
+
+# 2. 产物按格式各自出现
+ls bin/packages/*/base/*airoha-npu*.apk     # CONFIG_USE_APK=y
+ls bin/packages/*/base/*airoha-npu*.ipk     # CONFIG_USE_APK 未设置
+
+# 3. 本地单独编这个包时（新树）先补 host 工具，否则同样会 Error 127
+./scripts/feeds update -a && ./scripts/feeds install luci-base
+make package/feeds/luci/luci-base/host/compile
+make package/luci-app-airoha-npu/compile V=s
+```
+
+---
+
+## 五、其他隐藏问题
 
 | 问题 | 说明 | 改动 |
 |------|------|------|
@@ -244,7 +297,7 @@ ubus -v list luci.airoha_npu
 | `scripts/gen-po.py` | 新增，生成 + 校验语言文件 |
 | `root/usr/libexec/rpcd/luci.airoha_npu` | 模式恢复 100755；去掉会让 JSON 变形的 `echo 0` 备用分支 |
 | `.gitattributes` | 关键文件强制 LF |
-| `.github/workflows/build.yml` | airoha 两个子目标（an7581/an7583）矩阵编译、编译当前提交、带上语言包、校验语言文件与脚本执行位、合并发布 |
+| `.github/workflows/build.yml` | airoha 两个子目标 × `{apk, ipk}` 四种组合矩阵编译；先编 `luci-base/host` 拿到 `po2lmo`；校验语言文件与脚本执行位；合并发布 |
 | `README.md` | 语言包安装说明、目录结构、1.0.2 版本记录 |
 | `FIXES.md` | 本文件 |
 
@@ -287,6 +340,13 @@ ubus -v list luci.airoha_npu
   `CONFIG_LUCI_LANG_zh_Hans` and `_es`, and a final job merges the two artifact
   sets and publishes all three ipk files. They are `Architecture: all`, so the
   merged duplicate names collapse into a single copy that fits either SoC.
+* **CI builds apk and ipk.** 25.12 (and the airoha snapshot SDK) produces `.apk`;
+  `po2lmo` is not part of the SDK — it comes from `luci-base`'s host build — so
+  the workflow now runs `./scripts/feeds install luci-base` and
+  `make package/feeds/luci/luci-base/host/compile` before building this package,
+  otherwise every i18n package dies with `po2lmo: command not found` (Error 127).
+  The matrix is `{an7581, an7583} × {apk, ipk}`, switching package format with
+  `CONFIG_USE_APK` while leaving the SDK's target configuration untouched.
 * **Smaller fixes.** `.gitattributes` pins LF for the shell script and catalogs,
   the `grep -c … || echo 0` that produced `0\n0` for `printf %d` is gone, and the
   version is bumped to 1.0.2.
